@@ -6,7 +6,10 @@ use std::process::Command;
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Parser, Debug)]
-#[command(name = "gittracker-rs", about = "Scan folders for git repos with uncommitted changes")]
+#[command(
+    name = "gittracker-rs",
+    about = "Scan folders for git repos with uncommitted changes"
+)]
 struct Cli {
     /// Root folder to scan
     #[arg(default_value = ".")]
@@ -28,6 +31,12 @@ struct RepoStatus {
     changes: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct JsonOutput<'a> {
+    total: usize,
+    repos: &'a [RepoStatus],
+}
+
 fn main() {
     let cli = Cli::parse();
     let statuses = scan_root(&cli.root);
@@ -38,7 +47,18 @@ fn main() {
         print_human(&statuses, cli.show_clean);
     }
 
-    let has_dirty = statuses.iter().any(|status| status.is_dirty);
+    let dirty_count = statuses.iter().filter(|status| status.is_dirty).count();
+    let clean_count = statuses.len().saturating_sub(dirty_count);
+    let has_dirty = dirty_count > 0;
+    if !cli.json && !cli.show_clean && !has_dirty {
+        println!("no dirty repositories found");
+    }
+
+    if !cli.json {
+        println!("scanned {} repositories", statuses.len());
+        println!("dirty: {}, clean: {}", dirty_count, clean_count);
+    }
+
     if has_dirty {
         std::process::exit(1);
     }
@@ -104,7 +124,11 @@ fn get_repo_status(repo_root: &Path) -> RepoStatus {
 fn print_human(statuses: &[RepoStatus], show_clean: bool) {
     for status in statuses {
         if status.is_dirty {
-            println!("dirty: {} ({} files)", status.path.display(), status.changes);
+            println!(
+                "dirty: {} ({} files)",
+                status.path.display(),
+                status.changes
+            );
         } else if show_clean {
             println!("clean: {}", status.path.display());
         }
@@ -112,6 +136,10 @@ fn print_human(statuses: &[RepoStatus], show_clean: bool) {
 }
 
 fn print_json(statuses: &[RepoStatus]) {
-    let json = serde_json::to_string_pretty(statuses).unwrap_or_else(|_| "[]".to_string());
+    let output = JsonOutput {
+        total: statuses.len(),
+        repos: statuses,
+    };
+    let json = serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string());
     println!("{}", json);
 }
