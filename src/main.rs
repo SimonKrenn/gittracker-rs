@@ -8,7 +8,7 @@ use walkdir::{DirEntry, WalkDir};
 #[derive(Parser, Debug)]
 #[command(
     name = "gittracker-rs",
-    about = "Scan folders for git repos with uncommitted changes"
+    about = "Scan folders for git repos with local changes"
 )]
 struct Cli {
     /// Root folder to scan
@@ -28,7 +28,9 @@ struct Cli {
 struct RepoStatus {
     path: PathBuf,
     is_dirty: bool,
-    changes: usize,
+    uncommitted_changes: usize,
+    unpushed_commits: usize,
+    has_upstream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,14 +51,26 @@ fn main() {
 
     let dirty_count = statuses.iter().filter(|status| status.is_dirty).count();
     let clean_count = statuses.len().saturating_sub(dirty_count);
+    let uncommitted_count = statuses
+        .iter()
+        .filter(|status| status.uncommitted_changes > 0)
+        .count();
+    let unpushed_count = statuses
+        .iter()
+        .filter(|status| status.unpushed_commits > 0)
+        .count();
     let has_dirty = dirty_count > 0;
     if !cli.json && !cli.show_clean && !has_dirty {
-        println!("no dirty repositories found");
+        println!("no repositories with local changes found");
     }
 
     if !cli.json {
         println!("scanned {} repositories", statuses.len());
         println!("dirty: {}, clean: {}", dirty_count, clean_count);
+        println!(
+            "repos with uncommitted changes: {}, unpushed commits: {}",
+            uncommitted_count, unpushed_count
+        );
     }
 
     if has_dirty {
@@ -100,23 +114,58 @@ fn get_repo_status(repo_root: &Path) -> RepoStatus {
         .arg("-C")
         .arg(repo_root)
         .arg("status")
-        .arg("--porcelain")
+        .arg("--porcelain=2")
+        .arg("-b")
         .output();
 
     match output {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let changes = stdout.lines().count();
+            let mut uncommitted_changes = 0;
+            let mut unpushed_commits = 0;
+            let mut has_upstream = false;
+
+            for line in stdout.lines() {
+                if line.starts_with("# branch.upstream ") {
+                    has_upstream = true;
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("# branch.ab ") {
+                    for part in rest.split_whitespace() {
+                        if let Some(ahead) = part.strip_prefix('+') {
+                            if let Ok(value) = ahead.parse::<usize>() {
+                                unpushed_commits = value;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if line.starts_with("1 ")
+                    || line.starts_with("2 ")
+                    || line.starts_with("u ")
+                    || line.starts_with("? ")
+                {
+                    uncommitted_changes += 1;
+                }
+            }
+
+            let is_dirty = uncommitted_changes > 0 || unpushed_commits > 0;
             RepoStatus {
                 path: repo_root.to_path_buf(),
-                is_dirty: changes > 0,
-                changes,
+                is_dirty,
+                uncommitted_changes,
+                unpushed_commits,
+                has_upstream,
             }
         }
         Err(_) => RepoStatus {
             path: repo_root.to_path_buf(),
             is_dirty: false,
-            changes: 0,
+            uncommitted_changes: 0,
+            unpushed_commits: 0,
+            has_upstream: false,
         },
     }
 }
@@ -124,10 +173,17 @@ fn get_repo_status(repo_root: &Path) -> RepoStatus {
 fn print_human(statuses: &[RepoStatus], show_clean: bool) {
     for status in statuses {
         if status.is_dirty {
+            let upstream_note = if status.has_upstream {
+                ""
+            } else {
+                ", upstream: none"
+            };
             println!(
-                "dirty: {} ({} files)",
+                "dirty: {} (uncommitted: {} files, unpushed: {} commits{})",
                 status.path.display(),
-                status.changes
+                status.uncommitted_changes,
+                status.unpushed_commits,
+                upstream_note
             );
         } else if show_clean {
             println!("clean: {}", status.path.display());
